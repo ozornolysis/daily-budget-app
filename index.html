@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Daily Allowance Tracker</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 0; background: #0b0d12; color: #eef2ff; }
+    .wrap { max-width: 520px; margin: 0 auto; padding: 16px; }
+    .card { background: #121827; border: 1px solid #22304d; border-radius: 16px; padding: 14px; margin: 12px 0; }
+    h1 { font-size: 18px; margin: 6px 0 12px; }
+    .row { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .big { font-size: 28px; font-weight: 700; }
+    .muted { color: #a9b5d1; font-size: 13px; }
+    input, button { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid #2a3a5f; background: #0f1524; color: #eef2ff; }
+    button { background: #2a62ff; border: none; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #1b243a; border: 1px solid #2a3a5f; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .tabs { display: flex; gap: 8px; }
+    .tab { flex: 1; }
+    .list { margin: 0; padding: 0; list-style: none; }
+    .item { padding: 10px 0; border-bottom: 1px solid #22304d; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+    .ok { background: rgba(34,197,94,.15); color: #4ade80; border: 1px solid rgba(34,197,94,.35); }
+    .bad { background: rgba(239,68,68,.15); color: #f87171; border: 1px solid rgba(239,68,68,.35); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Daily Allowance Tracker</h1>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <div class="muted">Balance</div>
+          <div id="balance" class="big">£0.00</div>
+        </div>
+        <div id="statusPill" class="pill ok">In credit</div>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        Daily allowance: <strong id="dailyAmountLabel">£10.00</strong>
+        • Last credited day: <span id="lastCreditedLabel">–</span>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab secondary" onclick="showTab('today')">Today</button>
+      <button class="tab secondary" onclick="showTab('history')">History</button>
+      <button class="tab secondary" onclick="showTab('settings')">Settings</button>
+    </div>
+
+    <!-- TODAY -->
+    <div id="tab-today" class="card">
+      <div class="muted">Add an expense</div>
+      <div class="grid" style="margin-top:10px">
+        <input id="expenseAmount" inputmode="decimal" placeholder="Amount (e.g. 3.50)" />
+        <input id="expenseNote" placeholder="Note (optional)" />
+      </div>
+      <button style="margin-top:10px" onclick="addExpense()">Add expense</button>
+
+      <div style="margin-top:14px" class="muted">Today’s expenses</div>
+      <ul id="todayList" class="list"></ul>
+    </div>
+
+    <!-- HISTORY -->
+    <div id="tab-history" class="card" style="display:none">
+      <div class="muted">Daily summary (spent per day)</div>
+      <ul id="historyList" class="list" style="margin-top:8px"></ul>
+    </div>
+
+    <!-- SETTINGS -->
+    <div id="tab-settings" class="card" style="display:none">
+      <div class="muted">Daily allowance amount</div>
+      <input id="dailyAmount" inputmode="decimal" placeholder="e.g. 10" style="margin-top:10px" />
+      <button style="margin-top:10px" onclick="saveSettings()">Save</button>
+
+      <div class="muted" style="margin-top:16px">Safety</div>
+      <button class="secondary" style="margin-top:10px" onclick="exportData()">Export data (JSON)</button>
+      <button class="secondary" style="margin-top:10px" onclick="importData()">Import data (JSON)</button>
+      <button class="secondary" style="margin-top:10px" onclick="resetAll()">Reset everything</button>
+    </div>
+  </div>
+
+<script>
+  const STORAGE_KEY = "daily_allowance_tracker_v1";
+
+  function todayISO() {
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    return d.toISOString().slice(0,10);
+  }
+
+  function formatGBP(n) {
+    const v = Number(n || 0);
+    return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(v);
+  }
+
+  function loadState() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+
+    // Default state: £10 daily
+    return {
+      dailyAllowance: 10,
+      balance: 0,
+      lastCreditedDate: null, // ISO yyyy-mm-dd
+      expenses: [] // {id, dateISO, amount, note, ts}
+    };
+  }
+
+  function saveState(state) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  // BACKFILL ENABLED:
+  // - Adds £10 for every day missed since last open/credit.
+  function ensureDailyCredit(state) {
+    const t = todayISO();
+
+    // First ever run: credit today once
+    if (!state.lastCreditedDate) {
+      state.balance = Number(state.balance) + Number(state.dailyAllowance);
+      state.lastCreditedDate = t;
+      saveState(state);
+      return state;
+    }
+
+    // If already credited today, do nothing
+    if (state.lastCreditedDate === t) return state;
+
+    // Backfill: add allowance for each day since last credited date
+    const last = new Date(state.lastCreditedDate + "T00:00:00");
+    const today = new Date(t + "T00:00:00");
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const daysMissed = Math.floor((today - last) / msPerDay);
+
+    if (daysMissed > 0) {
+      state.balance = Number(state.balance) + (Number(state.dailyAllowance) * daysMissed);
+      state.lastCreditedDate = t;
+      saveState(state);
+    } else {
+      // Safety fallback: if dates are weird, just set to today without adding
+      state.lastCreditedDate = t;
+      saveState(state);
+    }
+
+    return state;
+  }
+
+  function showTab(name) {
+    for (const id of ["today","history","settings"]) {
+      document.getElementById("tab-" + id).style.display = (id === name) ? "block" : "none";
+    }
+    render();
+  }
+
+  function addExpense() {
+    const amountStr = document.getElementById("expenseAmount").value.trim().replace("£","");
+    const note = document.getElementById("expenseNote").value.trim();
+
+    const amount = Number(amountStr);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert("Enter a valid expense amount (greater than 0).");
+      return;
+    }
+
+    const state = ensureDailyCredit(loadState());
+    const item = {
+      id: crypto.randomUUID(),
+      dateISO: todayISO(),
+      amount: amount,
+      note: note,
+      ts: Date.now()
+    };
+
+    state.expenses.unshift(item);
+    state.balance = Number(state.balance) - amount;
+    saveState(state);
+
+    document.getElementById("expenseAmount").value = "";
+    document.getElementById("expenseNote").value = "";
+    render();
+  }
+
+  function deleteExpense(id) {
+    const state = ensureDailyCredit(loadState());
+    const idx = state.expenses.findIndex(x => x.id === id);
+    if (idx === -1) return;
+
+    const amt = Number(state.expenses[idx].amount);
+    state.expenses.splice(idx, 1);
+    state.balance = Number(state.balance) + amt;
+    saveState(state);
+    render();
+  }
+
+  function saveSettings() {
+    const val = Number(document.getElementById("dailyAmount").value.trim());
+    if (!Number.isFinite(val) || val <= 0) {
+      alert("Enter a valid daily allowance (greater than 0).");
+      return;
+    }
+    const state = loadState();
+    state.dailyAllowance = val;
+    saveState(state);
+    render();
+    alert("Saved.");
+  }
+
+  function resetAll() {
+    if (!confirm("Reset everything? This cannot be undone.")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    render();
+  }
+
+  function exportData() {
+    const state = loadState();
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "daily-allowance-tracker-backup.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function importData() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = () => {
+      const file = input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (typeof data.dailyAllowance !== "number" || typeof data.balance !== "number" || !Array.isArray(data.expenses)) {
+            alert("That file doesn’t look like a valid backup.");
+            return;
+          }
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+          render();
+          alert("Imported.");
+        } catch {
+          alert("Could not read that JSON file.");
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+
+  function groupByDate(expenses) {
+    const map = new Map();
+    for (const e of expenses) {
+      const key = e.dateISO;
+      map.set(key, (map.get(key) || 0) + Number(e.amount));
+    }
+    // newest first
+    return Array.from(map.entries()).sort((a,b) => b[0].localeCompare(a[0]));
+  }
+
+  function render() {
+    let state = loadState();
+    state = ensureDailyCredit(state);
+
+    document.getElementById("balance").textContent = formatGBP(state.balance);
+    document.getElementById("dailyAmountLabel").textContent = formatGBP(state.dailyAllowance);
+    document.getElementById("lastCreditedLabel").textContent = state.lastCreditedDate || "–";
+    document.getElementById("dailyAmount").value = state.dailyAllowance;
+
+    const pill = document.getElementById("statusPill");
+    if (Number(state.balance) >= 0) {
+      pill.textContent = "In credit";
+      pill.className = "pill ok";
+    } else {
+      pill.textContent = "Deficit";
+      pill.className = "pill bad";
+    }
+
+    // Today list
+    const t = todayISO();
+    const today = state.expenses.filter(x => x.dateISO === t);
+    const ul = document.getElementById("todayList");
+    ul.innerHTML = "";
+    if (today.length === 0) {
+      ul.innerHTML = `<li class="item muted">No expenses added today yet.</li>`;
+    } else {
+      for (const e of today) {
+        const li = document.createElement("li");
+        li.className = "item";
+        li.innerHTML = `
+          <div class="row">
+            <div>
+              <div><strong>${formatGBP(e.amount)}</strong> ${e.note ? `<span class="muted">• ${escapeHtml(e.note)}</span>` : ""}</div>
+              <div class="muted">${new Date(e.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</div>
+            </div>
+            <button class="secondary" style="width:auto;padding:8px 10px" onclick="deleteExpense('${e.id}')">Undo</button>
+          </div>`;
+        ul.appendChild(li);
+      }
+    }
+
+    // History
+    const hist = document.getElementById("historyList");
+    hist.innerHTML = "";
+    const grouped = groupByDate(state.expenses);
+    if (grouped.length === 0) {
+      hist.innerHTML = `<li class="item muted">No history yet.</li>`;
+    } else {
+      for (const [dateISO, totalSpent] of grouped) {
+        const li = document.createElement("li");
+        li.className = "item";
+        li.innerHTML = `
+          <div class="row">
+            <div><strong>${dateISO}</strong></div>
+            <div class="muted">Spent: ${formatGBP(totalSpent)}</div>
+          </div>`;
+        hist.appendChild(li);
+      }
+    }
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+  }
+
+  render();
+</script>
+</body>
+</html>
